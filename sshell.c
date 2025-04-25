@@ -52,7 +52,7 @@ bool parse_command(struct Command* cmd_object) {
     int cmd_count = 0;
     int arg_index = 0;
     cmd_object->background = false;
-
+    bool seen_output_redirection = false;
     char *token;
     char *saveptr;
     char temp[CMDLINE_MAX];
@@ -64,6 +64,10 @@ bool parse_command(struct Command* cmd_object) {
         if (strcmp(token, "|") == 0) {
             if (arg_index == 0) {
                 fprintf(stderr, "Error: missing command\n");
+                return false;
+            }
+            if (seen_output_redirection) {
+                fprintf(stderr, "Error: mislocated output redirection\n");
                 return false;
             }
             parsed_cmds[cmd_count][arg_index] = NULL;
@@ -79,6 +83,7 @@ bool parse_command(struct Command* cmd_object) {
                 fprintf(stderr, "Error: missing command\n");
                 return false;
             }
+            seen_output_redirection = true;
             token = strtok_r(NULL, " ", &saveptr);
             if (!token) {
                 fprintf(stderr, "Error: no output file\n");
@@ -92,7 +97,6 @@ bool parse_command(struct Command* cmd_object) {
             }
             close(fd);
             cmd_object->redirect_type = OUTPUT_REDIRECTION;
-            break;
         } else if (strcmp(token, "<") == 0) {
             if (arg_index == 0) {
                 fprintf(stderr, "Error: missing command\n");
