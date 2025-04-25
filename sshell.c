@@ -26,12 +26,7 @@ struct Command {
     bool background;
 };
 
-pid_t bg_pid = -1;
-char bg_cmd[CMDLINE_MAX] = "";
-int bg_status;
-bool bg_done_reported = true;
-
-char *preprocess(char *cmdline) {
+char *preprocess(char *cmdline) { //adding whitespace before we parse into tokens
     static char new_cmdline[CMDLINE_MAX * 2];
     int j = 0;
     for (int i = 0; cmdline[i] != '\0'; i++) {
@@ -51,17 +46,31 @@ bool parse_command(struct Command* cmd_object) {
     static char* parsed_cmds[MAX_CMDS][ARG_MAX];
     int cmd_count = 0;
     int arg_index = 0;
-    cmd_object->background = false;
-    bool seen_output_redirection = false;
+
     char *token;
     char *saveptr;
     char temp[CMDLINE_MAX];
     char *new_cmd = preprocess(cmd_object->raw_cmd);
     strncpy(temp, new_cmd, CMDLINE_MAX);
+    bool seen_output_redirection = false;
+    bool last_symbol_is_pipe = false;
 
     token = strtok_r(temp, " ", &saveptr);
     while (token != NULL) {
-        if (strcmp(token, "|") == 0) {
+        if (strcmp(token, "&") == 0) {
+            token = strtok_r(NULL, " ", &saveptr);
+            if (arg_index == 0) {
+                fprintf(stderr, "Error: missing command\n");
+                return false;
+            }
+            if (token != NULL) {
+                fprintf(stderr, "Error: mislocated background sign\n");
+                return false;
+            }
+            cmd_object->background = true;
+            break;
+        } else if (strcmp(token, "|") == 0) { //PIPING
+            last_symbol_is_pipe = true;
             if (arg_index == 0) {
                 fprintf(stderr, "Error: missing command\n");
                 return false;
@@ -71,14 +80,14 @@ bool parse_command(struct Command* cmd_object) {
                 return false;
             }
             parsed_cmds[cmd_count][arg_index] = NULL;
-            cmd_count++;
+            cmd_count++; //increase cmd counter
             if (cmd_count >= MAX_CMDS) {
                 fprintf(stderr, "Error: too many commands\n");
                 return false;
             }
-            arg_index = 0;
+            arg_index = 0; //restart arg counter
             cmd_object->redirect_type = PIPING;
-        } else if (strcmp(token, ">") == 0) {
+        } else if (strcmp(token, ">") == 0) { //OUTPUT REDIRECTION
             if (arg_index == 0) {
                 fprintf(stderr, "Error: missing command\n");
                 return false;
@@ -97,7 +106,8 @@ bool parse_command(struct Command* cmd_object) {
             }
             close(fd);
             cmd_object->redirect_type = OUTPUT_REDIRECTION;
-        } else if (strcmp(token, "<") == 0) {
+            //break;
+        } else if (strcmp(token, "<") == 0) { //INPUT REDIRECTION
             if (arg_index == 0) {
                 fprintf(stderr, "Error: missing command\n");
                 return false;
@@ -119,28 +129,26 @@ bool parse_command(struct Command* cmd_object) {
             }
             close(fd);
             cmd_object->redirect_type = INPUT_REDIRECTION;
-            break;
-        } else if (strcmp(token, "&") == 0) {
-            token = strtok_r(NULL, " ", &saveptr);
-            if (token != NULL) {
-                fprintf(stderr, "Error: mislocated background sign\n");
-                return false;
-            }
-            cmd_object->background = true;
+            continue;
         } else {
+            last_symbol_is_pipe = false;
             if (arg_index >= ARG_MAX - 1) {
                 fprintf(stderr, "Error: too many process arguments\n");
                 return false;
             }
-            parsed_cmds[cmd_count][arg_index++] = token;
+            parsed_cmds[cmd_count][arg_index++] = token; //put token into parsed command normally
         }
         token = strtok_r(NULL, " ", &saveptr);
+        if (token == NULL && last_symbol_is_pipe) {
+            fprintf(stderr, "Error: missing command\n");
+            return false;
+        }
     }
 
     parsed_cmds[cmd_count][arg_index] = NULL;
     cmd_count++;
 
-    cmd_object->commands = malloc(sizeof(char**) * (cmd_count + 1));
+    cmd_object->commands = malloc(sizeof(char**) * (cmd_count + 1)); //allocate memory for each new command
     for (int i = 0; i < cmd_count; i++) {
         cmd_object->commands[i] = parsed_cmds[i];
     }
@@ -157,19 +165,22 @@ bool parse_command(struct Command* cmd_object) {
 int main(void) {
     char cmd[CMDLINE_MAX];
     char *eof;
+    pid_t bg_pid = -1;
+    int bg_status;
+    char bg_cmd[CMDLINE_MAX] = "";
 
     while (1) {
-        if (bg_pid > 0) {
+        char *nl;
+        int retval;
+
+        if (bg_pid > 0) { //check if background job completed
             pid_t result = waitpid(bg_pid, &bg_status, WNOHANG);
             if (result > 0) {
                 fprintf(stderr, "+ completed '%s' [%d]\n", bg_cmd, WEXITSTATUS(bg_status));
                 bg_pid = -1;
-                bg_done_reported = true;
+                bg_cmd[0] = '\0';
             }
         }
-
-        char *nl;
-        int retval;
 
         printf("sshell@ucd$ ");
         fflush(stdout);
@@ -191,14 +202,16 @@ int main(void) {
             continue;
         }
 
-        struct Command cmd_object = {0};
+        struct Command cmd_object = {0}; //empty cmd_object
         strncpy(cmd_object.raw_cmd, cmd, CMDLINE_MAX);
         cmd_object.redirect_type = NO_REDIRECTION;
+        cmd_object.background = false;
 
         if (!parse_command(&cmd_object)) {
             continue;
         }
 
+        //builtin commands
         if (!strcmp(cmd_object.args[0], "exit")) {
             if (bg_pid > 0) {
                 fprintf(stderr, "Error: active job still running\n");
@@ -206,28 +219,69 @@ int main(void) {
                 continue;
             }
             fprintf(stderr, "Bye...\n");
-            fprintf(stderr, "+ completed 'exit' [%d]\n", EXIT_SUCCESS);
+            fprintf(stderr, "+ completed '%s' [%d]\n", cmd_object.raw_cmd, EXIT_SUCCESS);
             break;
         } else if (!strcmp(cmd_object.args[0], "pwd")) {
             char cwd[CMDLINE_MAX];
             getcwd(cwd, sizeof(cwd));
             printf("%s\n", cwd);
-            fprintf(stderr, "+ completed '%s' [0]\n", cmd_object.raw_cmd);
+            fprintf(stderr, "+ completed '%s' [%d]\n", cmd_object.raw_cmd, 0);
             continue;
         } else if (!strcmp(cmd_object.args[0], "cd")) {
             if (cmd_object.args[1] && chdir(cmd_object.args[1]) == 0) {
-                fprintf(stderr, "+ completed '%s' [0]\n", cmd_object.raw_cmd);
+                fprintf(stderr, "+ completed '%s' [%d]\n", cmd_object.raw_cmd, 0);
             } else {
                 fprintf(stderr, "Error: cannot cd into directory\n");
-                fprintf(stderr, "+ completed '%s' [1]\n", cmd_object.raw_cmd);
+                fprintf(stderr, "+ completed '%s' [%d]\n", cmd_object.raw_cmd, 1);
             }
             continue;
         }
 
-        if (cmd_object.redirect_type == PIPING) {
-            // piping logic skipped for brevity
-            continue;
-        } else {
+        if (cmd_object.redirect_type == PIPING) { //PIPING
+            int retval_list[MAX_CMDS];
+            int num_cmds = 0;
+            while (cmd_object.commands[num_cmds]) num_cmds++;
+
+            int pipefd[2 * (num_cmds - 1)];
+            for (int i = 0; i < num_cmds - 1; ++i) {
+                if (pipe(pipefd + i * 2) < 0) {
+                    exit(1);
+                }
+            }
+
+            pid_t pids[MAX_CMDS];
+            for (int i = 0; i < num_cmds; ++i) {
+                pids[i] = fork(); //create fork for each cmd
+                if (pids[i] == 0) {
+                    if (i > 0) {
+                        dup2(pipefd[(i - 1) * 2], STDIN_FILENO);
+                    }
+                    if (i < num_cmds - 1) {
+                        dup2(pipefd[i * 2 + 1], STDOUT_FILENO);
+                    }
+                    for (int j = 0; j < 2 * (num_cmds - 1); ++j) {
+                        close(pipefd[j]);
+                    }
+                    execvp(cmd_object.commands[i][0], cmd_object.commands[i]);
+                    fprintf(stderr, "Error: command not found\n");
+                    exit(1);
+                }
+            }
+
+            for (int i = 0; i < 2 * (num_cmds - 1); ++i) {
+                close(pipefd[i]);
+            }
+
+            for (int i = 0; i < num_cmds; ++i) {
+                waitpid(pids[i], &retval_list[i], 0);
+            }
+
+            fprintf(stderr, "+ completed '%s' ", cmd_object.raw_cmd);
+            for (int i = 0; i < num_cmds; ++i) {
+                fprintf(stderr, "[%d]", WEXITSTATUS(retval_list[i]));
+            }
+            fprintf(stderr, "\n");
+        } else { //normal execution
             pid_t pid = fork();
             if (pid == 0) {
                 if (cmd_object.redirect_type == OUTPUT_REDIRECTION) {
@@ -246,9 +300,15 @@ int main(void) {
                 if (cmd_object.background) {
                     bg_pid = pid;
                     strncpy(bg_cmd, cmd_object.raw_cmd, CMDLINE_MAX);
-                    bg_done_reported = false;
                 } else {
                     waitpid(pid, &retval, 0);
+                    if (bg_pid > 0) {
+                        pid_t result = waitpid(bg_pid, &bg_status, WNOHANG);
+                        if (result > 0) {
+                            fprintf(stderr, "+ completed '%s' [%d]\n", bg_cmd, WEXITSTATUS(bg_status));
+                            bg_pid = -1;
+                        }
+                    }
                     fprintf(stderr, "+ completed '%s' [%d]\n", cmd_object.raw_cmd, WEXITSTATUS(retval));
                 }
             } else {
